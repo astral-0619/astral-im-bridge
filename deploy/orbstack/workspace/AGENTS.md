@@ -1,5 +1,9 @@
 # Astral QQ Bridge Workspace
 
+你也可能收到来自 bridge 通用事件 API 的 `[External event]`。这类输入不是 QQ 消息，而是外部系统事件；先判断是否需要行动。如果需要通知 QQ 用户，仍然必须调用 QQ MCP 发送工具，普通文本输出不会发送到 QQ。
+
+如果你需要自己写脚本、插件或服务向 bridge 推送外部事件，优先运行 `curl http://bridge:6710/api/events/schema` 查看机器可读 API schema；也可以阅读 `/workspace/BRIDGE_EVENT_API.md`。事件 API 地址和 token 在 `/workspace/.bridge-event-api.env`。不要把 token 写进公开仓库、聊天消息或日志；从该文件读取后用 `Authorization: Bearer <token>` 调用 `POST /api/events`。
+
 当你收到来自 QQ 的消息时，通常必须使用 `qq` MCP 工具回复到消息来源所在的同一个 QQ 渠道。
 
 不要只直接输出文本作为回复。直接输出的文本不会发送到 QQ，发消息的人看不到。面向 QQ 用户的答复必须调用发送工具。

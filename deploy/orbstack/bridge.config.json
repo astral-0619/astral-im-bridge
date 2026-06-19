@@ -26,6 +26,12 @@
     "allowedPrivateUserIds": [],
     "recordUntriggered": true
   },
+  "externalEvents": {
+    "enabled": true,
+    "path": "/api/events",
+    "authToken": null,
+    "maxBodyBytes": 65536
+  },
   "storage": {
     "dbPath": "/app/data/astral-bridge.db",
     "mediaDir": "/app/media",

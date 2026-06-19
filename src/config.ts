@@ -30,6 +30,12 @@ const defaultConfig: BridgeConfig = {
     allowedPrivateUserIds: [],
     recordUntriggered: true,
   },
+  externalEvents: {
+    enabled: true,
+    path: "/api/events",
+    authToken: null,
+    maxBodyBytes: 64 * 1024,
+  },
   storage: {
     dbPath: "./data/astral-bridge.db",
     mediaDir: "./media",
@@ -71,6 +77,7 @@ function mergeConfig(base: BridgeConfig, patch: Partial<BridgeConfig>): BridgeCo
     mcp: { ...base.mcp, ...patch.mcp },
     astral: { ...base.astral, ...patch.astral },
     qq: { ...base.qq, ...patch.qq },
+    externalEvents: { ...base.externalEvents, ...patch.externalEvents },
     storage: { ...base.storage, ...patch.storage },
   };
 }
@@ -85,6 +92,11 @@ function applyEnvOverrides(config: BridgeConfig): void {
   config.qq.allowedPrivateUserIds =
     envList("ASTRAL_BRIDGE_ALLOWED_PRIVATE_USER_IDS") ?? config.qq.allowedPrivateUserIds;
   config.mcp.transport = parseMcpTransport(process.env.ASTRAL_BRIDGE_MCP_TRANSPORT) ?? config.mcp.transport;
+  config.externalEvents.enabled =
+    parseBoolean(process.env.ASTRAL_BRIDGE_EVENT_API_ENABLED) ?? config.externalEvents.enabled;
+  config.externalEvents.path = process.env.ASTRAL_BRIDGE_EVENT_API_PATH ?? config.externalEvents.path;
+  config.externalEvents.authToken =
+    process.env.ASTRAL_BRIDGE_EVENT_API_TOKEN ?? config.externalEvents.authToken;
 }
 
 function validateConfig(config: BridgeConfig): void {
@@ -103,6 +115,12 @@ function validateConfig(config: BridgeConfig): void {
   if (!config.mcp.path.startsWith("/")) {
     throw new Error("mcp.path must start with /");
   }
+  if (!config.externalEvents.path.startsWith("/")) {
+    throw new Error("externalEvents.path must start with /");
+  }
+  if (!Number.isInteger(config.externalEvents.maxBodyBytes) || config.externalEvents.maxBodyBytes <= 0) {
+    throw new Error("externalEvents.maxBodyBytes must be a positive integer");
+  }
   config.qq.allowedGroupIds = normalizeIdList(config.qq.allowedGroupIds);
   config.qq.allowedPrivateUserIds = normalizeIdList(config.qq.allowedPrivateUserIds);
   config.qq.botUserId = String(config.qq.botUserId);
@@ -119,6 +137,20 @@ function envList(name: string): string[] | null {
 function parseMcpTransport(value: string | undefined): "stdio" | "http" | null {
   if (value === "stdio" || value === "http") {
     return value;
+  }
+  return null;
+}
+
+function parseBoolean(value: string | undefined): boolean | null {
+  if (value == null || value.trim() === "") {
+    return null;
+  }
+  const normalized = value.trim().toLowerCase();
+  if (["1", "true", "yes", "on"].includes(normalized)) {
+    return true;
+  }
+  if (["0", "false", "no", "off"].includes(normalized)) {
+    return false;
   }
   return null;
 }

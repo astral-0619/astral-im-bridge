@@ -1,14 +1,16 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
+import { randomUUID } from "node:crypto";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { createMcpExpressApp } from "@modelcontextprotocol/sdk/server/express.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
+import type { AstralAppServerClient } from "./astral.js";
 import { error, log } from "./logger.js";
 import { ensureAttachmentDownloaded } from "./media.js";
 import type { OneBotClient } from "./onebot.js";
 import type { MessageStore } from "./store.js";
-import type { BridgeConfig, SourceType } from "./types.js";
+import type { BridgeConfig, ExternalEvent, SourceType } from "./types.js";
 
 const QQ_SEND_DELAY_MIN_MS = 3000;
 const QQ_SEND_DELAY_MAX_MS = 5000;
@@ -22,6 +24,24 @@ const outboundPartSchema = z.object({
 
 type OutboundPart = z.infer<typeof outboundPartSchema>;
 
+const externalEventSchema = z.object({
+  id: z.string().trim().min(1).max(200).optional(),
+  source: z.string().trim().min(1).max(100),
+  event_type: z.string().trim().min(1).max(100).optional(),
+  type: z.string().trim().min(1).max(100).optional(),
+  title: z.string().trim().max(500).optional(),
+  body: z.string().max(10_000).optional(),
+  text: z.string().max(10_000).optional(),
+  severity: z.string().trim().min(1).max(40).default("info"),
+  actor: z.unknown().optional(),
+  metadata: z.record(z.string(), z.unknown()).default({}),
+  dedupe_key: z.string().trim().min(1).max(500).optional(),
+  occurred_at: z.union([z.string(), z.number()]).optional(),
+  wants_agent_attention: z.boolean().default(true),
+}).passthrough();
+
+type ExternalEventRequest = z.infer<typeof externalEventSchema>;
+
 interface OutboundSegmentsOptions {
   message: string;
   images: string[];
@@ -33,9 +53,10 @@ export async function startMcpServer(
   config: BridgeConfig,
   onebot: OneBotClient,
   store: MessageStore,
+  astral: AstralAppServerClient,
 ): Promise<void> {
   if (config.mcp.transport === "http") {
-    await startHttpMcpServer(config, onebot, store);
+    await startHttpMcpServer(config, onebot, store, astral);
     return;
   }
 
@@ -246,12 +267,59 @@ async function startHttpMcpServer(
   config: BridgeConfig,
   onebot: OneBotClient,
   store: MessageStore,
+  astral: AstralAppServerClient,
 ): Promise<void> {
   const app = createMcpExpressApp({ host: config.mcp.host });
 
   app.get("/healthz", (_req: IncomingMessage, res: ServerResponse) => {
     writeJson(res, 200, { ok: true });
   });
+
+  if (config.externalEvents.enabled) {
+    app.get(`${config.externalEvents.path}/schema`, (_req: IncomingMessage, res: ServerResponse) => {
+      writeJson(res, 200, externalEventApiSchema(config));
+    });
+
+    app.post(config.externalEvents.path, async (
+      req: IncomingMessage & { body?: unknown },
+      res: ServerResponse,
+    ) => {
+      try {
+        if (!isAuthorizedEventRequest(config, req)) {
+          writeJson(res, 401, { ok: false, error: "unauthorized" });
+          return;
+        }
+        const body = await readJsonBody(req, config.externalEvents.maxBodyBytes);
+        const parsed = externalEventSchema.safeParse(body);
+        if (!parsed.success) {
+          writeJson(res, 400, {
+            ok: false,
+            error: "invalid event payload",
+            issues: parsed.error.issues,
+          });
+          return;
+        }
+
+        const event = normalizeExternalEvent(parsed.data);
+        if (parsed.data.wants_agent_attention) {
+          log("forwarding external event to astral", {
+            source: event.source,
+            eventType: event.eventType,
+            eventId: event.id,
+          });
+          await astral.submitExternalEvent(event);
+        }
+        writeJson(res, 202, {
+          ok: true,
+          accepted_for_astral: parsed.data.wants_agent_attention,
+          event,
+        });
+      } catch (err) {
+        error("failed to handle external event", { error: String(err) });
+        writeJson(res, 500, { ok: false, error: "failed to handle external event" });
+      }
+    });
+  }
 
   app.post(config.mcp.path, async (
     req: IncomingMessage & { body?: unknown },
@@ -307,13 +375,291 @@ async function startHttpMcpServer(
     host: config.mcp.host,
     port: config.mcp.port,
     path: config.mcp.path,
+    eventPath: config.externalEvents.enabled ? config.externalEvents.path : null,
   });
+}
+
+function isAuthorizedEventRequest(
+  config: BridgeConfig,
+  req: IncomingMessage,
+): boolean {
+  const token = config.externalEvents.authToken;
+  if (!token) {
+    return true;
+  }
+  return req.headers.authorization === `Bearer ${token}`;
+}
+
+async function readJsonBody(
+  req: IncomingMessage & { body?: unknown },
+  maxBodyBytes: number,
+): Promise<unknown> {
+  if (req.body !== undefined) {
+    const size = Buffer.byteLength(JSON.stringify(req.body), "utf8");
+    if (size > maxBodyBytes) {
+      throw new Error("event payload too large");
+    }
+    return req.body;
+  }
+
+  const chunks: Buffer[] = [];
+  let size = 0;
+  for await (const chunk of req) {
+    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    size += buffer.byteLength;
+    if (size > maxBodyBytes) {
+      throw new Error("event payload too large");
+    }
+    chunks.push(buffer);
+  }
+  return JSON.parse(Buffer.concat(chunks).toString("utf8"));
+}
+
+function normalizeExternalEvent(payload: ExternalEventRequest): ExternalEvent {
+  const now = new Date();
+  const eventType = payload.event_type ?? payload.type ?? "event";
+  return {
+    id: payload.id ?? randomUUID(),
+    source: payload.source,
+    eventType,
+    title: payload.title?.trim() || null,
+    body: payload.body ?? payload.text ?? "",
+    severity: payload.severity,
+    actor: payload.actor ?? null,
+    metadata: payload.metadata,
+    dedupeKey: payload.dedupe_key ?? null,
+    occurredAt: normalizeTimestamp(payload.occurred_at, now),
+    receivedAt: now.toISOString(),
+  };
+}
+
+function normalizeTimestamp(value: string | number | undefined, fallback: Date): string {
+  if (value == null) {
+    return fallback.toISOString();
+  }
+  if (typeof value === "number") {
+    const millis = value > 1_000_000_000_000 ? value : value * 1000;
+    return new Date(millis).toISOString();
+  }
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) {
+    return value;
+  }
+  return parsed.toISOString();
 }
 
 function writeJson(res: ServerResponse, statusCode: number, body: unknown): void {
   res.statusCode = statusCode;
   res.setHeader("content-type", "application/json");
   res.end(JSON.stringify(body));
+}
+
+function externalEventApiSchema(config: BridgeConfig): Record<string, unknown> {
+  return {
+    openapi: "3.1.0",
+    info: {
+      title: "Astral Bridge External Event API",
+      version: "0.1.0",
+    },
+    servers: [
+      { url: `http://${config.mcp.host}:${config.mcp.port}` },
+    ],
+    paths: {
+      [config.externalEvents.path]: {
+        post: {
+          summary: "Submit a generic external event to the fixed Astral session.",
+          security: config.externalEvents.authToken ? [{ bearerAuth: [] }] : [],
+          requestBody: {
+            required: true,
+            content: {
+              "application/json": {
+                schema: { $ref: "#/components/schemas/ExternalEventRequest" },
+                examples: {
+                  minecraftPlayerJoin: {
+                    value: {
+                      source: "minecraft:survival-main",
+                      event_type: "player_join",
+                      title: "Player joined",
+                      body: "Steve joined the server",
+                      actor: { id: "uuid", name: "Steve" },
+                      metadata: { world: "world", x: 120, y: 64, z: -33 },
+                    },
+                  },
+                  validationOnly: {
+                    value: {
+                      source: "test",
+                      event_type: "ping",
+                      body: "schema smoke test",
+                      wants_agent_attention: false,
+                    },
+                  },
+                },
+              },
+            },
+          },
+          responses: {
+            "202": {
+              description: "Event accepted.",
+              content: {
+                "application/json": {
+                  schema: { $ref: "#/components/schemas/ExternalEventResponse" },
+                },
+              },
+            },
+            "400": { description: "Invalid event payload." },
+            "401": { description: "Missing or invalid bearer token." },
+            "500": { description: "Bridge failed while processing the event." },
+          },
+        },
+      },
+      [`${config.externalEvents.path}/schema`]: {
+        get: {
+          summary: "Return this OpenAPI schema.",
+          responses: {
+            "200": { description: "OpenAPI schema." },
+          },
+        },
+      },
+    },
+    components: {
+      securitySchemes: {
+        bearerAuth: {
+          type: "http",
+          scheme: "bearer",
+        },
+      },
+      schemas: {
+        ExternalEventRequest: {
+          type: "object",
+          additionalProperties: true,
+          required: ["source"],
+          properties: {
+            id: {
+              type: "string",
+              minLength: 1,
+              maxLength: 200,
+              description: "Optional caller-provided event id. A UUID is generated when omitted.",
+            },
+            source: {
+              type: "string",
+              minLength: 1,
+              maxLength: 100,
+              description: "System or integration name, such as minecraft:survival-main.",
+            },
+            event_type: {
+              type: "string",
+              minLength: 1,
+              maxLength: 100,
+              description: "Event kind. You can also use the alias field type.",
+            },
+            type: {
+              type: "string",
+              minLength: 1,
+              maxLength: 100,
+              description: "Alias for event_type.",
+            },
+            title: {
+              type: "string",
+              maxLength: 500,
+              description: "Short display title.",
+            },
+            body: {
+              type: "string",
+              maxLength: 10000,
+              description: "Main event text. You can also use the alias field text.",
+            },
+            text: {
+              type: "string",
+              maxLength: 10000,
+              description: "Alias for body.",
+            },
+            severity: {
+              type: "string",
+              minLength: 1,
+              maxLength: 40,
+              default: "info",
+              description: "Severity label.",
+            },
+            actor: {
+              description: "User, process, or entity that caused the event.",
+            },
+            metadata: {
+              type: "object",
+              additionalProperties: true,
+              default: {},
+              description: "Structured event details.",
+            },
+            dedupe_key: {
+              type: "string",
+              minLength: 1,
+              maxLength: 500,
+              description: "Optional stable key supplied by the caller.",
+            },
+            occurred_at: {
+              oneOf: [{ type: "string" }, { type: "number" }],
+              description: "ISO timestamp, Unix seconds, or Unix milliseconds. Defaults to receive time.",
+            },
+            wants_agent_attention: {
+              type: "boolean",
+              default: true,
+              description: "Set false to validate and accept without forwarding to Astral.",
+            },
+          },
+        },
+        ExternalEventResponse: {
+          type: "object",
+          required: ["ok", "accepted_for_astral", "event"],
+          properties: {
+            ok: { type: "boolean" },
+            accepted_for_astral: { type: "boolean" },
+            event: { $ref: "#/components/schemas/ExternalEvent" },
+          },
+        },
+        ExternalEvent: {
+          type: "object",
+          required: [
+            "id",
+            "source",
+            "eventType",
+            "title",
+            "body",
+            "severity",
+            "actor",
+            "metadata",
+            "dedupeKey",
+            "occurredAt",
+            "receivedAt",
+          ],
+          properties: {
+            id: { type: "string" },
+            source: { type: "string" },
+            eventType: { type: "string" },
+            title: { type: ["string", "null"] },
+            body: { type: "string" },
+            severity: { type: "string" },
+            actor: {},
+            metadata: { type: "object", additionalProperties: true },
+            dedupeKey: { type: ["string", "null"] },
+            occurredAt: { type: "string", format: "date-time" },
+            receivedAt: { type: "string", format: "date-time" },
+          },
+        },
+      },
+    },
+    usage: {
+      credentialsFile: "/workspace/.bridge-event-api.env",
+      curl: [
+        "set -a",
+        ". /workspace/.bridge-event-api.env",
+        "set +a",
+        "curl -sS -X POST \"$ASTRAL_BRIDGE_EVENT_API_URL\" \\",
+        "  -H \"Authorization: Bearer $ASTRAL_BRIDGE_EVENT_API_TOKEN\" \\",
+        "  -H \"Content-Type: application/json\" \\",
+        "  --data '{\"source\":\"test\",\"event_type\":\"ping\",\"body\":\"hello\"}'",
+      ].join("\n"),
+      note: "Plain text output from Astral is not sent to QQ. Use QQ MCP send tools when an event requires QQ notification.",
+    },
+  };
 }
 
 async function sendQqActionWithDelay<T>(

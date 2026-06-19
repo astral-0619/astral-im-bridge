@@ -26,7 +26,7 @@ async function main(): Promise<void> {
   });
 
   await onebot.start();
-  await startMcpServer(config, onebot, store);
+  await startMcpServer(config, onebot, store, astral);
 }
 
 async function handleOneBotMessage(

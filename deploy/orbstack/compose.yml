@@ -15,6 +15,7 @@ services:
       ASTRAL_BRIDGE_ALLOWED_GROUP_IDS: ${QQ_ALLOWED_GROUP_IDS}
       ASTRAL_BRIDGE_ALLOWED_PRIVATE_USER_IDS: ${QQ_ALLOWED_PRIVATE_USER_IDS}
       ASTRAL_BRIDGE_MCP_TRANSPORT: http
+      ASTRAL_BRIDGE_EVENT_API_TOKEN: ${ASTRAL_BRIDGE_EVENT_API_TOKEN}
     volumes:
       - ./bridge/config:/config
       - ./bridge/data:/app/data

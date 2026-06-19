@@ -19,6 +19,7 @@ with QQ, Tencent, NapCat, OneBot, or Astral Code.
 - Support app-server `turn/steer` when the fixed Astral thread already has an active turn.
 - Expose Streamable HTTP or stdio MCP tools for QQ replies, history, media, files,
   images, mentions, and replies to specific QQ message ids.
+- Accept generic external event webhooks and forward them into the fixed Astral session.
 - Add a random 3-5 second delay before outbound QQ send actions.
 
 ## Requirements
@@ -89,6 +90,12 @@ Start from `examples/config.example.json`:
     "allowedPrivateUserIds": ["REPLACE_USER_ID"],
     "recordUntriggered": true
   },
+  "externalEvents": {
+    "enabled": true,
+    "path": "/api/events",
+    "authToken": "REPLACE_WITH_EVENT_API_TOKEN",
+    "maxBodyBytes": 65536
+  },
   "storage": {
     "dbPath": "./data/astral-bridge.db",
     "mediaDir": "./media",
@@ -109,6 +116,9 @@ Environment overrides:
 | `ASTRAL_BRIDGE_ALLOWED_GROUP_IDS` | Comma-separated allowed group ids. |
 | `ASTRAL_BRIDGE_ALLOWED_PRIVATE_USER_IDS` | Comma-separated allowed private user ids. |
 | `ASTRAL_BRIDGE_MCP_TRANSPORT` | `stdio` or `http`. |
+| `ASTRAL_BRIDGE_EVENT_API_ENABLED` | Enable or disable the external event API. |
+| `ASTRAL_BRIDGE_EVENT_API_PATH` | External event API path, default `/api/events`. |
+| `ASTRAL_BRIDGE_EVENT_API_TOKEN` | Optional bearer token required by the external event API. |
 
 `recordUntriggered` controls whether non-triggering messages from allowed conversations
 are stored. Keeping it enabled lets the agent fetch surrounding context without forwarding
@@ -195,6 +205,56 @@ Every forwarded turn includes a `conversation_unread` section. `unread_count` is
 number of stored messages in the same group/private conversation since the previous Astral
 prompt, including the current trigger message. The agent can call `qq_get_unread_messages`
 when that context is useful; it does not need to call it for every message.
+
+## External Event API
+
+When HTTP MCP is enabled, the same HTTP server can accept generic external events:
+
+```http
+GET /api/events/schema
+```
+
+Returns a machine-readable OpenAPI 3.1 schema with examples and curl usage.
+
+```http
+POST /api/events
+Authorization: Bearer REPLACE_WITH_EVENT_API_TOKEN
+Content-Type: application/json
+```
+
+```json
+{
+  "source": "minecraft:survival-main",
+  "event_type": "player_join",
+  "title": "Player joined",
+  "body": "Steve joined the server",
+  "actor": { "id": "uuid", "name": "Steve" },
+  "metadata": { "world": "world", "x": 120, "y": 64, "z": -33 }
+}
+```
+
+The bridge formats the event as an external system event and submits it to the fixed
+Astral thread using the same queue as QQ messages. Set `wants_agent_attention` to `false`
+to validate and accept an event without forwarding it into Astral.
+
+Request fields:
+
+| Field | Required | Description |
+| --- | --- | --- |
+| `source` | Yes | System or integration name, such as `minecraft:survival-main` or `monitoring`. |
+| `event_type` / `type` | No | Event kind. Defaults to `event`. |
+| `title` | No | Short title. |
+| `body` / `text` | No | Main event text. |
+| `severity` | No | Severity label. Defaults to `info`. |
+| `actor` | No | Entity that caused the event. |
+| `metadata` | No | Structured event details. |
+| `dedupe_key` | No | Optional stable key supplied by the caller. |
+| `occurred_at` | No | ISO timestamp, Unix seconds, or Unix milliseconds. |
+| `wants_agent_attention` | No | Defaults to `true`; set `false` for validation-only events. |
+| `id` | No | Caller-supplied event id. A UUID is generated when omitted. |
+
+Successful requests return `202 Accepted` with `{ ok, accepted_for_astral, event }`.
+Unauthorized requests return `401` when `externalEvents.authToken` is configured.
 
 ## Astral App-Server Behavior
 

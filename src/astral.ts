@@ -1,8 +1,8 @@
 import { EventEmitter } from "node:events";
 import WebSocket from "ws";
 import { error, log, warn } from "./logger.js";
-import type { AstralConfig, StoredMessage } from "./types.js";
-import { buildAstralPrompt } from "./message.js";
+import type { AstralConfig, ExternalEvent, StoredMessage } from "./types.js";
+import { buildAstralPrompt, buildExternalEventPrompt } from "./message.js";
 
 type RequestId = string;
 
@@ -30,11 +30,31 @@ export class AstralAppServerClient extends EventEmitter {
     return task;
   }
 
+  async submitExternalEvent(event: ExternalEvent): Promise<void> {
+    const task = this.submissionQueue.then(() => this.submitExternalEventNow(event));
+    this.submissionQueue = task.catch(() => undefined);
+    return task;
+  }
+
   private async submitInboundMessageNow(message: StoredMessage): Promise<void> {
     await this.ensureThread();
-    const input = this.buildInput(message);
+    const input = this.buildInput(buildAstralPrompt(message), message.attachments);
     const clientUserMessageId = `qq:${message.sourceType}:${message.targetId}:${message.platformMessageId}`;
+    await this.submitInput(clientUserMessageId, input, message.platformMessageId);
+  }
 
+  private async submitExternalEventNow(event: ExternalEvent): Promise<void> {
+    await this.ensureThread();
+    const input = this.buildInput(buildExternalEventPrompt(event), []);
+    const clientUserMessageId = `external:${event.source}:${event.id}`;
+    await this.submitInput(clientUserMessageId, input, event.id);
+  }
+
+  private async submitInput(
+    clientUserMessageId: string,
+    input: Array<Record<string, unknown>>,
+    logId: string,
+  ): Promise<void> {
     if (this.activeTurnId) {
       try {
         await this.request("turn/steer", {
@@ -46,7 +66,7 @@ export class AstralAppServerClient extends EventEmitter {
         log("steered active astral turn", {
           threadId: this.config.threadId,
           turnId: this.activeTurnId,
-          messageId: message.platformMessageId,
+          messageId: logId,
         });
         return;
       } catch (err) {
@@ -68,7 +88,7 @@ export class AstralAppServerClient extends EventEmitter {
     log("started astral turn", {
       threadId: this.config.threadId,
       turnId: this.activeTurnId,
-      messageId: message.platformMessageId,
+      messageId: logId,
     });
   }
 
@@ -115,17 +135,20 @@ export class AstralAppServerClient extends EventEmitter {
     }
   }
 
-  private buildInput(message: StoredMessage): Array<Record<string, unknown>> {
+  private buildInput(
+    prompt: string,
+    attachments: StoredMessage["attachments"],
+  ): Array<Record<string, unknown>> {
     const input: Array<Record<string, unknown>> = [
       {
         type: "text",
-        text: buildAstralPrompt(message),
+        text: prompt,
         textElements: [],
       },
     ];
 
     if (this.config.includeImageInputs) {
-      for (const attachment of message.attachments) {
+      for (const attachment of attachments) {
         if (attachment.kind === "image" && attachment.url) {
           input.push({
             type: "image",

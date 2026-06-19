@@ -6,6 +6,7 @@ export interface BridgeConfig {
   mcp: McpConfig;
   astral: AstralConfig;
   qq: QqConfig;
+  externalEvents: ExternalEventsConfig;
   storage: StorageConfig;
 }
 
@@ -38,6 +39,13 @@ export interface QqConfig {
   allowedGroupIds: string[];
   allowedPrivateUserIds: string[];
   recordUntriggered: boolean;
+}
+
+export interface ExternalEventsConfig {
+  enabled: boolean;
+  path: string;
+  authToken: string | null;
+  maxBodyBytes: number;
 }
 
 export interface StorageConfig {
@@ -136,4 +144,18 @@ export interface StoredMessageRow {
   trigger: TriggerKind;
   reply_to_message_id: string | null;
   raw_event_json: string;
+}
+
+export interface ExternalEvent {
+  id: string;
+  source: string;
+  eventType: string;
+  title: string | null;
+  body: string;
+  severity: string;
+  actor: unknown;
+  metadata: Record<string, unknown>;
+  dedupeKey: string | null;
+  occurredAt: string;
+  receivedAt: string;
 }

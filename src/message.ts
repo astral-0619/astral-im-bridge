@@ -1,4 +1,5 @@
 import type {
+  ExternalEvent,
   GroupInfo,
   MessageSegment,
   OneBotMessageEvent,
@@ -173,6 +174,47 @@ export function buildAstralPrompt(message: StoredMessage): string {
   );
   lines.push(
     "Examples: mixed group reply => qq_send_group_message({ group_id, reply_to_message_id: message_id, parts: [{type:\"text\",text:\"收到 \"},{type:\"at\",user_id:sender_user_id},{type:\"text\",text:\"，我也请 \"},{type:\"at\",user_id:\"123456\"},{type:\"text\",text:\" 看一下\"}] }); private file => qq_send_private_file({ user_id: sender_user_id, file: \"/workspace/result.zip\", name: \"result.zip\" }).",
+  );
+
+  return lines.join("\n");
+}
+
+export function buildExternalEventPrompt(event: ExternalEvent): string {
+  const lines = [
+    "[External event]",
+    `source: ${event.source}`,
+    `event_type: ${event.eventType}`,
+    `event_id: ${event.id}`,
+    `severity: ${event.severity}`,
+    `occurred_at: ${event.occurredAt}`,
+    `received_at: ${event.receivedAt}`,
+  ];
+  if (event.title) {
+    lines.push(`title: ${event.title}`);
+  }
+  if (event.dedupeKey) {
+    lines.push(`dedupe_key: ${event.dedupeKey}`);
+  }
+
+  if (event.actor != null) {
+    lines.push("");
+    lines.push("actor:");
+    lines.push(JSON.stringify(event.actor, null, 2));
+  }
+
+  if (Object.keys(event.metadata).length > 0) {
+    lines.push("");
+    lines.push("metadata:");
+    lines.push(JSON.stringify(event.metadata, null, 2));
+  }
+
+  lines.push("");
+  lines.push("body:");
+  lines.push(event.body);
+  lines.push("");
+  lines.push("event_policy:");
+  lines.push(
+    "This is an external system event delivered through Astral Bridge. Decide whether it needs action. If you need to notify QQ users, call the QQ MCP send tools; plain text output is not visible to QQ.",
   );
 
   return lines.join("\n");
