@@ -331,7 +331,7 @@ function createBridgeMcpServer(
         group_id: args.group_id,
         message_id: oneBotResponseMessageId(response),
         reply_to_message_id: args.reply_to_message_id ?? null,
-        text: args.message,
+        text: "消息已送达",
         parts_count: message.length,
       }));
     },
@@ -371,7 +371,7 @@ function createBridgeMcpServer(
         user_id: args.user_id,
         message_id: oneBotResponseMessageId(response),
         reply_to_message_id: args.reply_to_message_id ?? null,
-        text: args.message,
+        text: "消息已送达",
         parts_count: message.length,
       }));
     },
@@ -831,7 +831,7 @@ function registerTelegramTools(
         message_id: String(response.message_id),
         message_thread_id: response.message_thread_id == null ? null : String(response.message_thread_id),
         reply_to_message_id: args.reply_to_message_id ?? null,
-        text: telegramPlainText(outbound.segments),
+        text: "消息已送达",
       }));
     },
   );
