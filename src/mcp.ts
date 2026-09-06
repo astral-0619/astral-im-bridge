@@ -529,6 +529,38 @@ async function downloadQqAttachment(
     }
   }
 
+  // NapCat's private-file message segments commonly contain only a local
+  // path (inside the NapCat container) and a file_id.  The path is not
+  // readable from the bridge container, so ask OneBot for the transferable
+  // file URL/path just as we do for images.  `get_file` has appeared with
+  // both `file_id` and `file` parameter names across adapters; try the
+  // canonical form first and retain the fallback for older NapCat builds.
+  if (attachment.kind === "file") {
+    const fileId = attachment.fileId ?? attachment.name;
+    if (fileId) {
+      const candidates = [
+        { file_id: fileId },
+        { file: fileId },
+      ];
+      for (const params of candidates) {
+        try {
+          const response = await onebot.callAction<{ data?: unknown }>("get_file", params);
+          const data = asRecord((response as { data?: unknown }).data);
+          const fileUrl = stringField(data, "url");
+          if (fileUrl) {
+            return await downloadAttachmentFromUrl(store, attachment, fileUrl);
+          }
+          const filePath = stringField(data, "file");
+          if (filePath) {
+            return await downloadAttachmentFromOneBotFile(store, attachment, filePath);
+          }
+        } catch (err) {
+          errors.push(String(err));
+        }
+      }
+    }
+  }
+
   throw new Error(`failed to download QQ media: ${errors.join("; ")}`);
 }
 
